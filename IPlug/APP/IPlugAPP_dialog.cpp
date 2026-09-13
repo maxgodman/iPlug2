@@ -74,21 +74,33 @@ void IPlugAPPHost::PopulateAudioInputList(HWND hwndDlg, RtAudio::DeviceInfo* inf
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_L,CB_RESETCONTENT,0,0);
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_RESETCONTENT,0,0);
 
-  int i;
+  // "Input 1 (L)" picks where the plugin's run of channels starts, so it lists
+  // every channel that leaves room for the rest of the run.
+  const int nPlugChans = GetPlug()->MaxNChannels(ERoute::kInput);
+  const int nDevChans = (int) info->inputChannels;
 
-  for (i=0; i<info->inputChannels -1; i++)
+  int nStarts = nDevChans - nPlugChans + 1;
+
+  if (nStarts < 0)
+    nStarts = 0;
+
+  for (int i = 0; i < nDevChans; i++)
   {
     buf.SetFormatted(20, "%i", i+1);
-    SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_L,CB_ADDSTRING,0,(LPARAM)buf.Get());
+
+    if (i < nStarts)
+      SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_L,CB_ADDSTRING,0,(LPARAM)buf.Get());
+
     SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_ADDSTRING,0,(LPARAM)buf.Get());
   }
 
-  // TEMP
-  buf.SetFormatted(20, "%i", i+1);
-  SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_ADDSTRING,0,(LPARAM)buf.Get());
+  ClampAudioChans(ERoute::kInput, (uint32_t) nDevChans);
 
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_L,CB_SETCURSEL, mState.mAudioInChanL - 1, 0);
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_SETCURSEL, mState.mAudioInChanR - 1, 0);
+
+  // Derived from L, and meaningless for a mono route.
+  EnableWindow(GetDlgItem(hwndDlg, IDC_COMBO_AUDIO_IN_R), nPlugChans > 1);
 }
 
 void IPlugAPPHost::PopulateAudioOutputList(HWND hwndDlg, RtAudio::DeviceInfo* info)
@@ -98,21 +110,33 @@ void IPlugAPPHost::PopulateAudioOutputList(HWND hwndDlg, RtAudio::DeviceInfo* in
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_L,CB_RESETCONTENT,0,0);
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_RESETCONTENT,0,0);
 
-  int i;
+  // "Output 1 (L)" picks where the plugin's run of channels starts, so it
+  // lists every channel that leaves room for the rest of the run.
+  const int nPlugChans = GetPlug()->MaxNChannels(ERoute::kOutput);
+  const int nDevChans = (int) info->outputChannels;
 
-  for (i=0; i<info->outputChannels -1; i++)
+  int nStarts = nDevChans - nPlugChans + 1;
+
+  if (nStarts < 0)
+    nStarts = 0;
+
+  for (int i = 0; i < nDevChans; i++)
   {
     buf.SetFormatted(20, "%i", i+1);
-    SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_L,CB_ADDSTRING,0,(LPARAM)buf.Get());
+
+    if (i < nStarts)
+      SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_L,CB_ADDSTRING,0,(LPARAM)buf.Get());
+
     SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_ADDSTRING,0,(LPARAM)buf.Get());
   }
 
-  // TEMP
-  buf.SetFormatted(20, "%i", i+1);
-  SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_ADDSTRING,0,(LPARAM)buf.Get());
+  ClampAudioChans(ERoute::kOutput, (uint32_t) nDevChans);
 
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_L,CB_SETCURSEL, mState.mAudioOutChanL - 1, 0);
   SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_SETCURSEL, mState.mAudioOutChanR - 1, 0);
+
+  // Derived from L, and meaningless for a mono route.
+  EnableWindow(GetDlgItem(hwndDlg, IDC_COMBO_AUDIO_OUT_R), nPlugChans > 1);
 }
 
 // This has to get called after any change to audio driver/in dev/out dev
@@ -371,7 +395,6 @@ WDL_DLGRET IPlugAPPHost::PreferencesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPar
 
               // Reset IO
               mState.mAudioOutChanL = 1;
-              mState.mAudioOutChanR = 2;
 
               _this->PopulateAudioDialogs(hwndDlg);
             }
@@ -386,7 +409,6 @@ WDL_DLGRET IPlugAPPHost::PreferencesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPar
 
             // Reset IO
             mState.mAudioInChanL = 1;
-            mState.mAudioInChanR = 2;
 
             _this->PopulateDriverSpecificControls(hwndDlg);
           }
@@ -400,7 +422,6 @@ WDL_DLGRET IPlugAPPHost::PreferencesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPar
 
             // Reset IO
             mState.mAudioOutChanL = 1;
-            mState.mAudioOutChanR = 2;
 
             _this->PopulateDriverSpecificControls(hwndDlg);
           }
@@ -409,37 +430,41 @@ WDL_DLGRET IPlugAPPHost::PreferencesDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wPar
         case IDC_COMBO_AUDIO_IN_L:
           if (HIWORD(wParam) == CBN_SELCHANGE)
           {
-            mState.mAudioInChanL = (int) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_IN_L, CB_GETCURSEL, 0, 0) + 1;
+            const uint32_t nPlugChans = (uint32_t) _this->GetPlug()->MaxNChannels(ERoute::kInput);
 
-            //TEMP
-            mState.mAudioInChanR = mState.mAudioInChanL + 1;
+            mState.mAudioInChanL = (uint32_t) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_IN_L, CB_GETCURSEL, 0, 0) + 1;
+            mState.mAudioInChanR = mState.mAudioInChanL + nPlugChans - 1;
+
             SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_SETCURSEL, mState.mAudioInChanR - 1, 0);
-            //
           }
           break;
 
         case IDC_COMBO_AUDIO_IN_R:
+          // Follows "Input 1 (L)", so put back whatever it was.
           if (HIWORD(wParam) == CBN_SELCHANGE)
-            SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_SETCURSEL, mState.mAudioInChanR - 1, 0);  // TEMP
-                mState.mAudioInChanR = (int) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_IN_R, CB_GETCURSEL, 0, 0);
+          {
+            SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_IN_R,CB_SETCURSEL, mState.mAudioInChanR - 1, 0);
+          }
           break;
 
         case IDC_COMBO_AUDIO_OUT_L:
           if (HIWORD(wParam) == CBN_SELCHANGE)
           {
-            mState.mAudioOutChanL = (int) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_OUT_L, CB_GETCURSEL, 0, 0) + 1;
+            const uint32_t nPlugChans = (uint32_t) _this->GetPlug()->MaxNChannels(ERoute::kOutput);
 
-            //TEMP
-            mState.mAudioOutChanR = mState.mAudioOutChanL + 1;
+            mState.mAudioOutChanL = (uint32_t) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_OUT_L, CB_GETCURSEL, 0, 0) + 1;
+            mState.mAudioOutChanR = mState.mAudioOutChanL + nPlugChans - 1;
+
             SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_SETCURSEL, mState.mAudioOutChanR - 1, 0);
-            //
           }
           break;
 
         case IDC_COMBO_AUDIO_OUT_R:
+          // Follows "Output 1 (L)", so put back whatever it was.
           if (HIWORD(wParam) == CBN_SELCHANGE)
-            SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_SETCURSEL, mState.mAudioOutChanR - 1, 0);  // TEMP
-                mState.mAudioOutChanR = (int) SendDlgItemMessage(hwndDlg, IDC_COMBO_AUDIO_OUT_R, CB_GETCURSEL, 0, 0);
+          {
+            SendDlgItemMessage(hwndDlg,IDC_COMBO_AUDIO_OUT_R,CB_SETCURSEL, mState.mAudioOutChanR - 1, 0);
+          }
           break;
 
 //        case IDC_CB_MONO_INPUT:

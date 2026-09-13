@@ -582,18 +582,43 @@ void IPlugAPPHost::CloseAudio()
   }
 }
 
+uint32_t IPlugAPPHost::ClampAudioChans(ERoute route, uint32_t nDeviceChannels)
+{
+  const uint32_t nPlugChans = static_cast<uint32_t>(GetPlug()->MaxNChannels(route));
+
+  if (nPlugChans == 0)
+    return 0;
+
+  const bool isInput = route == ERoute::kInput;
+
+  uint32_t& chanL = isInput ? mState.mAudioInChanL : mState.mAudioOutChanL;
+  uint32_t& chanR = isInput ? mState.mAudioInChanR : mState.mAudioOutChanR;
+
+  uint32_t offset = chanL > 0 ? chanL - 1 : 0;
+
+  // Settings written against a device with more channels: fall back rather
+  // than fail to open the stream.
+  if (offset + nPlugChans > nDeviceChannels)
+    offset = 0;
+
+  chanL = offset + 1;
+  chanR = offset + nPlugChans;
+
+  return offset;
+}
+
 bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_t iovs)
 {
   CloseAudio();
 
   RtAudio::StreamParameters iParams, oParams;
   iParams.deviceId = inID;
-  iParams.nChannels = GetPlug()->MaxNChannels(ERoute::kInput); // TODO: flexible channel count
-  iParams.firstChannel = 0; // TODO: flexible channel count
+  iParams.nChannels = GetPlug()->MaxNChannels(ERoute::kInput);
+  iParams.firstChannel = ClampAudioChans(ERoute::kInput, mDAC->getDeviceInfo(inID).inputChannels);
 
   oParams.deviceId = outID;
-  oParams.nChannels = GetPlug()->MaxNChannels(ERoute::kOutput); // TODO: flexible channel count
-  oParams.firstChannel = 0; // TODO: flexible channel count
+  oParams.nChannels = GetPlug()->MaxNChannels(ERoute::kOutput);
+  oParams.firstChannel = ClampAudioChans(ERoute::kOutput, mDAC->getDeviceInfo(outID).outputChannels);
 
   mBufferSize = iovs; // mBufferSize may get changed by stream
 

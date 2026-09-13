@@ -217,6 +217,13 @@ public:
   bool InitMidi();
   void CloseAudio();
   bool InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_t iovs);
+
+  /** Clamp a route's stored channel selection in mState so the plugin's run of
+   * channels fits the device, deriving the R channel from the L one.
+   * @param route Either kInput or kOutput
+   * @param nDeviceChannels The number of channels the device has on that route
+   * @return The zero-based offset to pass to RtAudio as firstChannel */
+  uint32_t ClampAudioChans(ERoute route, uint32_t nDeviceChannels);
   bool AudioSettingsInStateAreEqual(AppState& os, AppState& ns);
   bool MIDISettingsInStateAreEqual(AppState& os, AppState& ns);
 
