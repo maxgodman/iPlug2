@@ -18,13 +18,17 @@
  
  Notes:
  
- App settings are stored in a .ini (text) file. The location is as follows:
+ App settings are stored in a .ini (text) file. The location is as follows,
+ where APP_SETTINGS_SUBPATH defaults to BUNDLE_NAME:
  
- Windows7: C:\Users\USERNAME\AppData\Local\BUNDLE_NAME\settings.ini
- Windows XP/Vista: C:\Documents and Settings\USERNAME\Local Settings\Application Data\BUNDLE_NAME\settings.ini
- macOS: /Users/USERNAME/Library/Application\ Support/BUNDLE_NAME/settings.ini
+ Windows7: C:\Users\USERNAME\AppData\Local\APP_SETTINGS_SUBPATH\settings.ini
+ Windows XP/Vista: C:\Documents and Settings\USERNAME\Local Settings\Application Data\APP_SETTINGS_SUBPATH\settings.ini
+ macOS: /Users/USERNAME/Library/Application\ Support/APP_SETTINGS_SUBPATH/settings.ini
  OR
- /Users/USERNAME/Library/Containers/BUNDLE_ID/Data/Library/Application Support/BUNDLE_NAME/settings.ini
+ /Users/USERNAME/Library/Containers/BUNDLE_ID/Data/Library/Application Support/APP_SETTINGS_SUBPATH/settings.ini
+ 
+ Define APP_SETTINGS_SUBPATH in config.h to override it. It may name more than
+ one folder, e.g. "Company\Product"; the intermediate folders are created.
  
  */
 
@@ -44,6 +48,12 @@
 #include "IPlugAPP.h"
 
 #include "config.h"
+
+// Below config.h, so a product's own definition is seen first and this is
+// only a fallback. BUNDLE_NAME comes from the same file.
+#ifndef APP_SETTINGS_SUBPATH
+  #define APP_SETTINGS_SUBPATH BUNDLE_NAME
+#endif
 
 #ifdef OS_WIN
   #include <WindowsX.h>
