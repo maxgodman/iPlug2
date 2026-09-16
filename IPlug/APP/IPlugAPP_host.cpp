@@ -25,6 +25,61 @@ using namespace iplug;
 
 #define STRBUFSZ 100
 
+namespace
+{
+// Make a single directory; its parent must exist already.
+void MakeDirectory(const char* dir)
+{
+#ifdef OS_WIN
+  CreateDirectory(dir, NULL);
+#else
+  mkdir(dir, S_IRWXU | S_IRWXG | S_IRWXO);
+#endif
+}
+
+// As MakeDirectory(), but makes the intermediate directories too, so
+// APP_SETTINGS_SUBPATH can name more than one. A trailing separator is fine.
+bool MakeDirectoryTree(const char* path)
+{
+  WDL_String buf(path);
+  char* writablePath = buf.Get();
+  int len = buf.GetLength();
+
+  // Drop any trailing separator; stat() below rejects a path ending in one.
+  while (len > 0 && (writablePath[len - 1] == '\\' || writablePath[len - 1] == '/'))
+    writablePath[--len] = '\0';
+
+  if (len == 0)
+    return false;
+
+  // Make each parent in turn. Temporarily replacing a separator with a terminator
+  // makes the buffer read as the path up to it.
+  // Starting at + 1 keeps cursor[-1] valid and steps over any leading separator.
+  for (char* cursor = writablePath + 1; *cursor; ++cursor)
+  {
+    if (*cursor != '\\' && *cursor != '/')
+      continue;
+
+    // A separator straight after ':' or another separator is part of a root.
+    // e.g. the "\" of "C:\", or the second of "\\server".
+    const bool isRootSeparator = cursor[-1] == ':' || cursor[-1] == '\\' || cursor[-1] == '/';
+
+    if (isRootSeparator)
+      continue;
+
+    const char separator = *cursor;
+    *cursor = '\0';
+    MakeDirectory(writablePath);
+    *cursor = separator;
+  }
+
+  MakeDirectory(writablePath);
+
+  struct stat st;
+  return stat(writablePath, &st) == 0;
+}
+} // namespace
+
 std::unique_ptr<IPlugAPPHost> IPlugAPPHost::sInstance;
 UINT gSCROLLMSG;
 
@@ -88,9 +143,9 @@ bool IPlugAPPHost::InitState()
 #if defined OS_WIN
   char strPath[MAX_PATH_LEN];
   SHGetSpecialFolderPathUTF8(NULL, strPath, MAX_PATH_LEN, CSIDL_LOCAL_APPDATA, FALSE);
-  mINIPath.SetFormatted(MAX_PATH_LEN, "%s\\%s\\", strPath, BUNDLE_NAME);
+  mINIPath.SetFormatted(MAX_PATH_LEN, "%s\\%s\\", strPath, APP_SETTINGS_SUBPATH);
 #elif defined OS_MAC
-  mINIPath.SetFormatted(MAX_PATH_LEN, "%s/Library/Application Support/%s/", getenv("HOME"), BUNDLE_NAME);
+  mINIPath.SetFormatted(MAX_PATH_LEN, "%s/Library/Application Support/%s/", getenv("HOME"), APP_SETTINGS_SUBPATH);
 #else
   #error NOT IMPLEMENTED
 #endif
@@ -137,15 +192,16 @@ bool IPlugAPPHost::InitState()
   {
 #if defined OS_WIN
     // folder doesn't exist - make folder and make file
-    CreateDirectory(mINIPath.Get(), NULL);
+    if (!MakeDirectoryTree(mINIPath.Get()))
+      return false;
     mINIPath.Append("settings.ini");
     UpdateINI(); // will write file if doesn't exist
 #elif defined OS_MAC
     mode_t process_mask = umask(0);
-    int result_code = mkdir(mINIPath.Get(), S_IRWXU | S_IRWXG | S_IRWXO);
+    const bool haveSettingsDir = MakeDirectoryTree(mINIPath.Get());
     umask(process_mask);
 
-    if (!result_code)
+    if (haveSettingsDir)
     {
       mINIPath.Append("settings.ini");
       UpdateINI(); // will write file if doesn't exist
