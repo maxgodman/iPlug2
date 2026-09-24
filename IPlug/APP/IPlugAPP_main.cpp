@@ -180,7 +180,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpszCmdPa
       pAppHost->SetNoIO(true);
 
     pAppHost->Init();
-    pAppHost->TryToChangeAudio();
+    pAppHost->TryToChangeAudio(true); // the device's own rate and buffer size, not the ones last saved
 
     HACCEL hAccel = LoadAccelerators(gHINSTANCE, MAKEINTRESOURCE(IDR_ACCELERATOR1));
 

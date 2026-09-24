@@ -3603,19 +3603,30 @@ bool RtApiAsio :: probeDeviceOpen( unsigned int deviceId, StreamMode mode, unsig
   stream_.nUserChannels[mode] = channels;
   stream_.channelOffset[mode] = firstChannel;
 
-  // Verify the sample rate is supported.
-  result = ASIOCanSampleRate( (ASIOSampleRate) sampleRate );
-  if ( result != ASE_OK ) {
-    errorStream_ << "RtApiAsio::probeDeviceOpen: driver (" << driverName << ") does not support requested sample rate (" << sampleRate << ").";
-    errorText_ = errorStream_.str();
-    goto error;
-  }
-
   // Get the current sample rate
   ASIOSampleRate currentRate;
   result = ASIOGetSampleRate( &currentRate );
   if ( result != ASE_OK ) {
     errorStream_ << "RtApiAsio::probeDeviceOpen: driver (" << driverName << ") error getting sample rate.";
+    errorText_ = errorStream_.str();
+    goto error;
+  }
+
+  // A sample rate of zero asks for the one the driver is already running at,
+  // as a buffer size of zero asks for its preferred size, so that opening a
+  // stream leaves the device's own settings alone. A driver that reports no
+  // current rate (Realtek's reports 0) gets the device's preferred one.
+  if ( sampleRate == 0 ) {
+    sampleRate = (unsigned int) std::lround( currentRate );
+    for ( unsigned int m=0; sampleRate == 0 && m<deviceList_.size(); m++ ) {
+      if ( deviceList_[m].ID == deviceId ) sampleRate = deviceList_[m].preferredSampleRate;
+    }
+  }
+
+  // Verify the sample rate is supported.
+  result = ASIOCanSampleRate( (ASIOSampleRate) sampleRate );
+  if ( result != ASE_OK ) {
+    errorStream_ << "RtApiAsio::probeDeviceOpen: driver (" << driverName << ") does not support requested sample rate (" << sampleRate << ").";
     errorText_ = errorStream_.str();
     goto error;
   }
