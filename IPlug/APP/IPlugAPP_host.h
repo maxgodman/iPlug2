@@ -32,6 +32,7 @@
  
  */
 
+#include <atomic>
 #include <cstdlib>
 #include <string>
 #include <vector>
@@ -61,6 +62,12 @@
   #include <shlobj.h>
   #define DEFAULT_INPUT_DEV "Default Device"
   #define DEFAULT_OUTPUT_DEV "Default Device"
+  // Posted to the main window when the device has closed the stream by itself,
+  // which an ASIO driver does when its buffer size or sample rate is changed
+  // outside the app. LPARAM is a handle to the thread still closing it, or NULL.
+  #define WM_APP_AUDIO_DEVICE_RESET (WM_APP + 1)
+  // Drives the reopen that follows WM_APP_AUDIO_DEVICE_RESET.
+  #define IDT_AUDIO_RESET_TIMER 1002
 #elif defined(OS_MAC)
   #include "IPlugSWELL.h"
   #define SLEEP( milliseconds ) usleep( (unsigned long) (milliseconds * 1000.0) )
@@ -238,8 +245,26 @@ public:
   bool MIDISettingsInStateAreEqual(AppState& os, AppState& ns);
 
   bool TryToChangeAudioDriverType();
-  bool TryToChangeAudio();
+
+  /** Open the audio stream on the devices named in mState
+   * @param followDevice For ASIO, open at the sample rate and buffer size the
+   * driver is already running at, rather than the ones in mState, and store
+   * those in mState. Launching and a driver reset use this, so the app only
+   * changes a device setting when it is changed in the app's own dialog.
+   * Ignored for other driver types.
+   * @return true if the stream opened and started */
+  bool TryToChangeAudio(bool followDevice = false);
   bool SelectMIDIDevice(ERoute direction, const char* portName);
+
+#ifdef OS_WIN
+  /** Handles WM_APP_AUDIO_DEVICE_RESET on the main thread, and takes ownership
+   * of the handle */
+  void OnAudioDeviceReset(HANDLE closingThread);
+  /** Handles IDT_AUDIO_RESET_TIMER on the main thread */
+  void OnAudioResetTimer();
+  /** Set when a reset arrives before the main window exists to be told */
+  static std::atomic<bool> sAudioResetBeforeWindow;
+#endif
   
   static int AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_t nFrames, double streamTime, RtAudioStreamStatus status, void* pUserData);
   static void MIDICallback(double deltatime, std::vector<uint8_t>* pMsg, void* pUserData);
@@ -277,7 +302,16 @@ private:
   std::optional<uint32_t> mDefaultInputDev;
   /** The ID of the operating system's default output device if detected */
   std::optional<uint32_t> mDefaultOutputDev;
-    
+
+#ifdef OS_WIN
+  /** The thread RtAudio is closing the stream on after a driver reset.
+   * The stream cannot be reopened until it has finished. */
+  HANDLE mAudioResetThread = NULL;
+  /** Timer ticks spent reopening after a driver reset, so that a device which
+   * has gone for good is not retried forever */
+  int mAudioResetTicks = 0;
+#endif
+
   WDL_String mINIPath;
   WDL_String mScreenshotPath;
 

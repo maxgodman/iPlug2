@@ -596,10 +596,32 @@ WDL_DLGRET IPlugAPPHost::MainDlgProc(HWND hwndDlg, UINT uMsg, WPARAM wParam, LPA
         SetTimer(hwndDlg, IDT_SCREENSHOT_TIMER, 500, nullptr); // 500ms delay
       }
 
+#ifdef OS_WIN
+      // Audio starts before this window exists, so a driver reset can too.
+      if (IPlugAPPHost::sAudioResetBeforeWindow.exchange(false))
+        PostMessage(hwndDlg, WM_APP_AUDIO_DEVICE_RESET, 0, 0);
+#endif
+
       return 1;
     }
+#ifdef OS_WIN
+    case WM_APP_AUDIO_DEVICE_RESET:
+      if (pAppHost)
+        pAppHost->OnAudioDeviceReset((HANDLE) lParam);
+      else if (lParam)
+        CloseHandle((HANDLE) lParam);
+      return 0;
+#endif
     case WM_TIMER:
     {
+#ifdef OS_WIN
+      if (wParam == IDT_AUDIO_RESET_TIMER)
+      {
+        if (pAppHost)
+          pAppHost->OnAudioResetTimer();
+        return 0;
+      }
+#endif
       if (wParam == IDT_SCREENSHOT_TIMER)
       {
         KillTimer(hwndDlg, IDT_SCREENSHOT_TIMER);

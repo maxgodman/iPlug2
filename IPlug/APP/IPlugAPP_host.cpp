@@ -83,6 +83,19 @@ bool MakeDirectoryTree(const char* path)
 std::unique_ptr<IPlugAPPHost> IPlugAPPHost::sInstance;
 UINT gSCROLLMSG;
 
+#ifdef OS_WIN
+std::atomic<bool> IPlugAPPHost::sAudioResetBeforeWindow{false};
+
+namespace
+{
+// How often the reopen after a driver reset is tried, and how many times.
+// A device that still will not open after that has probably been unplugged
+// rather than reconfigured.
+constexpr UINT kAudioResetTickMs = 100;
+constexpr int kAudioResetMaxTicks = 30;
+} // namespace
+#endif
+
 IPlugAPPHost::IPlugAPPHost()
 : mIPlug(MakePlug(InstanceInfo{this}))
 {
@@ -466,7 +479,7 @@ bool IPlugAPPHost::TryToChangeAudioDriverType()
   return false;
 }
 
-bool IPlugAPPHost::TryToChangeAudio()
+bool IPlugAPPHost::TryToChangeAudio(bool followDevice)
 {
   // Skip audio initialization in no-I/O mode or screenshot mode
   if (mNoIO || IsScreenshotMode())
@@ -524,6 +537,12 @@ bool IPlugAPPHost::TryToChangeAudio()
 
   if (inputID && outputID)
   {
+#if defined OS_WIN
+    // Zero asks RtAudio for the rate and buffer size the driver already has.
+    if (followDevice && mState.mAudioDriverType == kDeviceASIO)
+      return InitAudio(inputID.value(), outputID.value(), 0, 0);
+#endif
+
     return InitAudio(inputID.value(), outputID.value(), mState.mAudioSR, mState.mBufferSize);
   }
 
@@ -687,14 +706,9 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
 
   mBufIndex = 0;
   mSamplesElapsed = 0;
-  mSampleRate = static_cast<double>(sr);
   mVecWait = 0;
   mAudioEnding = false;
   mAudioDone = false;
-  
-  mIPlug->SetBlockSize(APP_SIGNAL_VECTOR_SIZE);
-  mIPlug->SetSampleRate(mSampleRate);
-  mIPlug->OnReset();
 
   auto status = mDAC->openStream(&oParams, iParams.nChannels > 0 ? &iParams : nullptr, RTAUDIO_FLOAT64, sr, &mBufferSize, &AudioCallback, this, &options);
 
@@ -703,6 +717,24 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
     DBGMSG("%s", mDAC->getErrorText().c_str());
     return false;
   }
+
+  // The rate the stream opened at: sr itself when one was given, and the
+  // device's own when sr was zero, which is only known now. That is why the
+  // plug-in is reset after the stream opens rather than before; nothing calls
+  // back until the stream starts.
+  mSampleRate = static_cast<double>(mDAC->getStreamSampleRate());
+
+  // What was chosen goes into the state, so the dialog shows it.
+  // mTempState too, which the dialog's Cancel restores.
+  if (sr == 0)
+    mState.mAudioSR = mTempState.mAudioSR = static_cast<uint32_t>(mSampleRate);
+
+  if (iovs == 0)
+    mState.mBufferSize = mTempState.mBufferSize = mBufferSize;
+
+  mIPlug->SetBlockSize(APP_SIGNAL_VECTOR_SIZE);
+  mIPlug->SetSampleRate(mSampleRate);
+  mIPlug->OnReset();
 
   for (int i = 0; i < iParams.nChannels; i++)
   {
@@ -878,5 +910,75 @@ void IPlugAPPHost::MIDICallback(double deltatime, std::vector<uint8_t>* pMsg, vo
 void IPlugAPPHost::ErrorCallback(RtAudioErrorType type, const std::string &errorText)
 {
   std::cerr << "\nerrorCallback: " << errorText << "\n\n";
+
+#ifdef OS_WIN
+  // An ASIO driver asks for a reset when its buffer size or sample rate is
+  // changed outside the app, and RtAudio answers by closing the stream and
+  // reporting this, from a thread of its own, part way through the close.
+  // So nothing here touches the stream; the main thread reopens it, once that
+  // thread has finished.
+  if (type == RTAUDIO_DEVICE_DISCONNECT)
+  {
+    HWND hwnd = gHWND;
+
+    if (!hwnd)
+    {
+      sAudioResetBeforeWindow = true;
+      return;
+    }
+
+    HANDLE closingThread = NULL;
+
+    if (GetWindowThreadProcessId(hwnd, nullptr) != GetCurrentThreadId())
+      closingThread = OpenThread(SYNCHRONIZE, FALSE, GetCurrentThreadId());
+
+    if (!PostMessage(hwnd, WM_APP_AUDIO_DEVICE_RESET, 0, (LPARAM) closingThread) && closingThread)
+      CloseHandle(closingThread);
+  }
+#endif
 }
+
+#ifdef OS_WIN
+void IPlugAPPHost::OnAudioDeviceReset(HANDLE closingThread)
+{
+  // A second reset before the first is dealt with starts the wait again.
+  if (mAudioResetThread)
+    CloseHandle(mAudioResetThread);
+
+  mAudioResetThread = closingThread;
+  mAudioResetTicks = 0;
+
+  // Polled rather than waited on: the driver was loaded on this thread and
+  // may message it while it closes, so blocking here could deadlock both.
+  SetTimer(gHWND, IDT_AUDIO_RESET_TIMER, kAudioResetTickMs, nullptr);
+}
+
+void IPlugAPPHost::OnAudioResetTimer()
+{
+  // Stopped while an attempt runs, since a failed one can put up a message
+  // box and the timer would go on firing underneath it.
+  KillTimer(gHWND, IDT_AUDIO_RESET_TIMER);
+
+  const bool lastTry = ++mAudioResetTicks >= kAudioResetMaxTicks;
+
+  if (mAudioResetThread)
+  {
+    if (WaitForSingleObject(mAudioResetThread, 0) == WAIT_TIMEOUT && !lastTry)
+    {
+      SetTimer(gHWND, IDT_AUDIO_RESET_TIMER, kAudioResetTickMs, nullptr);
+      return;
+    }
+
+    CloseHandle(mAudioResetThread);
+    mAudioResetThread = NULL;
+  }
+
+  // Already reopened by something else, the preferences dialog say.
+  if (mExiting || (mDAC && mDAC->isStreamOpen()))
+    return;
+
+  if (!TryToChangeAudio(true) && !lastTry)
+    SetTimer(gHWND, IDT_AUDIO_RESET_TIMER, kAudioResetTickMs, nullptr);
+}
+#endif
 
