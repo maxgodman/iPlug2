@@ -10,6 +10,8 @@
 
 #include "IPlugAPP_host.h"
 
+#include <algorithm>
+
 #ifdef OS_WIN
 #include <sys/stat.h>
 #include "win32_utf8.h"
@@ -704,7 +706,6 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
   options.flags = RTAUDIO_NONINTERLEAVED;
   // options.streamName = BUNDLE_NAME; // JACK stream name, not used on other streams
 
-  mBufIndex = 0;
   mSamplesElapsed = 0;
   mVecWait = 0;
   mAudioEnding = false;
@@ -829,35 +830,31 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
     if (doFade)
       ApplyFades(pInputBufferD, nins, nFrames, _this->mAudioEnding);
     
-    for (int i = 0; i < nFrames; i++)
+    // Blocks of APP_SIGNAL_VECTOR_SIZE, the last one shorter so that none runs past the end of the buffer
+    for (uint32_t start = 0; start < nFrames; start += APP_SIGNAL_VECTOR_SIZE)
     {
-      _this->mBufIndex %= APP_SIGNAL_VECTOR_SIZE;
+      const uint32_t n = std::min<uint32_t>(APP_SIGNAL_VECTOR_SIZE, nFrames - start);
 
-      if (_this->mBufIndex == 0)
+      for (int c = 0; c < nins; c++)
       {
-        for (int c = 0; c < nins; c++)
-        {
-          _this->mInputBufPtrs.Set(c, (pInputBufferD + (c * nFrames)) + i);
-        }
-        
-        for (int c = 0; c < nouts; c++)
-        {
-          _this->mOutputBufPtrs.Set(c, (pOutputBufferD + (c * nFrames)) + i);
-        }
-        
-        _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), APP_SIGNAL_VECTOR_SIZE);
-
-        _this->mSamplesElapsed += APP_SIGNAL_VECTOR_SIZE;
+        _this->mInputBufPtrs.Set(c, (pInputBufferD + (c * nFrames)) + start);
       }
-      
+
       for (int c = 0; c < nouts; c++)
       {
-        pOutputBufferD[c * nFrames + i] *= APP_MULT;
+        _this->mOutputBufPtrs.Set(c, (pOutputBufferD + (c * nFrames)) + start);
       }
 
-      _this->mBufIndex++;
+      _this->mIPlug->AppProcess(_this->mInputBufPtrs.GetList(), _this->mOutputBufPtrs.GetList(), static_cast<int>(n));
+
+      _this->mSamplesElapsed += n;
     }
-    
+
+    for (uint32_t i = 0; i < nFrames * nouts; i++)
+    {
+      pOutputBufferD[i] *= APP_MULT;
+    }
+
     if (doFade)
       ApplyFades(pOutputBufferD, nouts, nFrames, _this->mAudioEnding);
     
