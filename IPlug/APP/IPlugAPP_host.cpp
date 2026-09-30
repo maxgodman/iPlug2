@@ -11,6 +11,7 @@
 #include "IPlugAPP_host.h"
 
 #include <algorithm>
+#include <chrono>
 
 #ifdef OS_WIN
 #include <sys/stat.h>
@@ -657,6 +658,18 @@ void IPlugAPPHost::CloseAudio()
     
     mDAC->closeStream();
   }
+
+  mCallbackFrames = 0;
+}
+
+AppCallbackLoad IPlugAPPHost::TakeCallbackLoad()
+{
+  AppCallbackLoad load;
+  load.frames = mCallbackFrames.load(std::memory_order_relaxed);
+  load.sampleRate = mSampleRate;
+  load.callbacks = mCallbackCount.exchange(0, std::memory_order_relaxed);
+  load.worstSeconds = static_cast<double>(mCallbackWorstNs.exchange(0, std::memory_order_relaxed)) * 1e-9;
+  return load;
 }
 
 uint32_t IPlugAPPHost::ClampAudioChans(ERoute route, uint32_t nDeviceChannels)
@@ -708,6 +721,9 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
 
   mSamplesElapsed = 0;
   mVecWait = 0;
+  mCallbackFrames = 0;
+  mCallbackWorstNs = 0;
+  mCallbackCount = 0;
   mAudioEnding = false;
   mAudioDone = false;
 
@@ -816,6 +832,8 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
 {
   IPlugAPPHost* _this = (IPlugAPPHost*) pUserData;
 
+  const auto callbackStart = std::chrono::steady_clock::now();
+
   int nins = _this->GetPlug()->MaxNChannels(ERoute::kInput);
   int nouts = _this->GetPlug()->MaxNChannels(ERoute::kOutput);
   
@@ -867,6 +885,17 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
   }
   
   _this->mVecWait = std::min(_this->mVecWait + 1, uint32_t(APP_N_VECTOR_WAIT + 1));
+
+  // For TakeCallbackLoad. Only this thread raises the worst time, so a plain
+  // store will do: at worst, a reading taken at this moment misses one callback.
+  const auto elapsed = std::chrono::steady_clock::now() - callbackStart;
+  const int64_t elapsedNs = std::chrono::duration_cast<std::chrono::nanoseconds>(elapsed).count();
+
+  if (elapsedNs > _this->mCallbackWorstNs.load(std::memory_order_relaxed))
+    _this->mCallbackWorstNs.store(elapsedNs, std::memory_order_relaxed);
+
+  _this->mCallbackFrames.store(nFrames, std::memory_order_relaxed);
+  _this->mCallbackCount.fetch_add(1, std::memory_order_relaxed);
 
   return 0;
 }

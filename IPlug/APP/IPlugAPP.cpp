@@ -124,6 +124,11 @@ void IPlugAPP::SendSysexMsgFromUI(const ISysEx& msg)
   SendSysEx(msg);
 }
 
+AppCallbackLoad IPlugAPP::TakeCallbackLoad()
+{
+  return mAppHost ? mAppHost->TakeCallbackLoad() : AppCallbackLoad{};
+}
+
 void IPlugAPP::AppProcess(double** inputs, double** outputs, int nFrames)
 {
   SetChannelConnections(ERoute::kInput, 0, MaxNChannels(ERoute::kInput), !IsInstrument()); //TODO: go elsewhere - enable inputs

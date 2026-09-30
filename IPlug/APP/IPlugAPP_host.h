@@ -235,6 +235,10 @@ public:
   void CloseAudio();
   bool InitAudio(uint32_t inId, uint32_t outId, uint32_t sr, uint32_t iovs);
 
+  /** IPlugAPP::TakeCallbackLoad forwards here, since the plug-in cannot reach
+   * the host itself. See that for what it returns */
+  AppCallbackLoad TakeCallbackLoad();
+
   /** Clamp a route's stored channel selection in mState so the plug-in's run of
    * channels fits the device, deriving the R channel from the L one.
    * @param route Either kInput or kOutput
@@ -296,6 +300,11 @@ private:
   bool mAudioEnding = false;
   bool mAudioDone = false;
   bool mNoIO = false;
+
+  /** Written by the audio callback, read and reset by TakeCallbackLoad */
+  std::atomic<int64_t> mCallbackWorstNs {0};
+  std::atomic<uint32_t> mCallbackCount {0};
+  std::atomic<uint32_t> mCallbackFrames {0};
 
   /** The ID of the operating system's default input device if detected */
   std::optional<uint32_t> mDefaultInputDev;
