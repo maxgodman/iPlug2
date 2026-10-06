@@ -239,6 +239,23 @@ public:
    * the host itself. See that for what it returns */
   AppCallbackLoad TakeCallbackLoad();
 
+  /** Whether an audio stream is open */
+  bool IsAudioStreamOpen() const { return mDAC && mDAC->isStreamOpen(); }
+
+  /** How many inputs the open device has; 0 while no stream is open */
+  uint32_t DeviceInputChannels() const { return mDAC && mDAC->isStreamOpen() ? mDeviceInputChannels : 0; }
+
+  /** The first device input the plug-in reads, 1-based; 0 while no stream is
+   * open, or the plug-in reads no inputs */
+  uint32_t PlugInputChannel() const
+  {
+    // A plug-in with no inputs reads none, whatever the saved selection says
+    return mDAC && mDAC->isStreamOpen() && mIPlug->MaxNChannels(ERoute::kInput) > 0 ? mState.mAudioInChanL : 0;
+  }
+
+  /** The extra device input the open stream carries, 1-based; 0 while none is */
+  uint32_t ExtraInputChannel() const { return mDAC && mDAC->isStreamOpen() ? mExtraInputChannelOpen : 0; }
+
   /** Clamp a route's stored channel selection in mState so the plug-in's run of
    * channels fits the device, deriving the R channel from the L one.
    * @param route Either kInput or kOutput
@@ -306,6 +323,21 @@ private:
   std::atomic<uint32_t> mCallbackCount {0};
   std::atomic<uint32_t> mCallbackFrames {0};
 
+  /** Where the plug-in's channels start in the run of inputs the stream opened */
+  int mPlugInputOffset = 0;
+  /** Where the tap's extra channel starts in that run; -1 when there is none */
+  int mExtraInputOffset = -1;
+  /** How many device inputs the stream opened */
+  int mOpenInputChannels = 0;
+  /** How many inputs the open device has */
+  uint32_t mDeviceInputChannels = 0;
+  /** The extra device input the stream ended up carrying, 1-based; 0 when the
+   * wider run of inputs did not open */
+  uint32_t mExtraInputChannelOpen = 0;
+  /** Counts the streams that started, for AppAudioTapBlock::stream. Raised
+   * once one is running, so the callback can be reading it as it is raised */
+  std::atomic<uint32_t> mStreamCount {0};
+
   /** The ID of the operating system's default input device if detected */
   std::optional<uint32_t> mDefaultInputDev;
   /** The ID of the operating system's default output device if detected */
@@ -330,7 +362,17 @@ private:
   
   WDL_PtrList<double> mInputBufPtrs;
   WDL_PtrList<double> mOutputBufPtrs;
-  
+  /** One pointer per plug-in channel for the tap, filled in by the callback.
+   * Sized when a stream opens to the plug-in's config channel counts, which
+   * cannot change while it lives */
+  WDL_PtrList<double> mTapInputPtrs;
+  WDL_PtrList<double> mTapOutputPtrs;
+
+  /** Called by IPlugAPP::SetExtraInputChannel. Reopens a running stream with
+   * the requested channel; with none running there is nothing to reopen, and
+   * the plug-in's request is picked up by the next stream */
+  void OnExtraInputChannelChanged();
+
   friend class IPlugAPP;
 };
 

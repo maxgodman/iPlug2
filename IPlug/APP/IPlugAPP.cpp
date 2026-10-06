@@ -129,6 +129,45 @@ AppCallbackLoad IPlugAPP::TakeCallbackLoad()
   return mAppHost ? mAppHost->TakeCallbackLoad() : AppCallbackLoad{};
 }
 
+void IPlugAPP::SetAppAudioTap(IAppAudioTap* pTap)
+{
+  mAudioTap.store(pTap, std::memory_order_release);
+}
+
+bool IPlugAPP::SetExtraInputChannel(uint32_t channel)
+{
+  if (channel != mExtraInputChannel)
+  {
+    mExtraInputChannel = channel;
+
+    // The plug-in is made inside the host's constructor, before the host's own
+    // members exist, so from there the request just waits in mExtraInputChannel
+    // for the first stream to open with it.
+    if (mHostReady && mAppHost)
+      mAppHost->OnExtraInputChannelChanged();
+  }
+
+  // In place means a stream carries it or will. Only an open stream can refuse
+  // a channel, by the device not having it or the wider run not opening; asked
+  // for none, there is nothing to be in place.
+  return channel > 0 && mAppHost && (!mHostReady || !mAppHost->IsAudioStreamOpen() || mAppHost->ExtraInputChannel() > 0);
+}
+
+uint32_t IPlugAPP::GetDeviceInputChannels() const
+{
+  return mHostReady && mAppHost ? mAppHost->DeviceInputChannels() : 0;
+}
+
+uint32_t IPlugAPP::GetPlugInputChannel() const
+{
+  return mHostReady && mAppHost ? mAppHost->PlugInputChannel() : 0;
+}
+
+uint32_t IPlugAPP::GetExtraInputChannel() const
+{
+  return mHostReady && mAppHost ? mAppHost->ExtraInputChannel() : 0;
+}
+
 void IPlugAPP::AppProcess(double** inputs, double** outputs, int nFrames)
 {
   SetChannelConnections(ERoute::kInput, 0, MaxNChannels(ERoute::kInput), !IsInstrument()); //TODO: go elsewhere - enable inputs

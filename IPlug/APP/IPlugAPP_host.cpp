@@ -126,6 +126,7 @@ IPlugAPPHost* IPlugAPPHost::Create()
 
 bool IPlugAPPHost::Init()
 {
+  mIPlug->mHostReady = true;
   mIPlug->SetHost("standalone", mIPlug->GetPluginVersion(false));
     
   if (!InitState())
@@ -660,6 +661,7 @@ void IPlugAPPHost::CloseAudio()
   }
 
   mCallbackFrames = 0;
+  mExtraInputChannelOpen = 0;
 }
 
 AppCallbackLoad IPlugAPPHost::TakeCallbackLoad()
@@ -670,6 +672,14 @@ AppCallbackLoad IPlugAPPHost::TakeCallbackLoad()
   load.callbacks = mCallbackCount.exchange(0, std::memory_order_relaxed);
   load.worstSeconds = static_cast<double>(mCallbackWorstNs.exchange(0, std::memory_order_relaxed)) * 1e-9;
   return load;
+}
+
+void IPlugAPPHost::OnExtraInputChannelChanged()
+{
+  // Nothing to reopen before the first stream or after the app is shutting
+  // down; the plug-in's request waits for the next stream.
+  if (!mExiting && mDAC && mDAC->isStreamOpen())
+    TryToChangeAudio(true);
 }
 
 uint32_t IPlugAPPHost::ClampAudioChans(ERoute route, uint32_t nDeviceChannels)
@@ -702,9 +712,36 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
   CloseAudio();
 
   RtAudio::StreamParameters iParams, oParams;
+  const uint32_t nDeviceInputs = mDAC->getDeviceInfo(inID).inputChannels;
   iParams.deviceId = inID;
   iParams.nChannels = GetPlug()->MaxNChannels(ERoute::kInput);
-  iParams.firstChannel = ClampAudioChans(ERoute::kInput, mDAC->getDeviceInfo(inID).inputChannels);
+  iParams.firstChannel = ClampAudioChans(ERoute::kInput, nDeviceInputs);
+
+  // RtAudio opens one contiguous run of inputs, so the plug-in's run is
+  // widened to cover the tap's extra channel too; the offsets below say where
+  // each of them starts.
+  mDeviceInputChannels = nDeviceInputs;
+  mPlugInputOffset = 0;
+  mExtraInputOffset = -1;
+
+  const uint32_t plugFirst = iParams.firstChannel;
+  const uint32_t plugChannels = iParams.nChannels;
+
+  const uint32_t extraInput = mIPlug->mExtraInputChannel;
+  if (extraInput > 0 && extraInput <= nDeviceInputs)
+  {
+    const uint32_t extra = extraInput - 1;
+    // A plug-in with no inputs has no run of its own to widen, so the extra
+    // channel is the run.
+    const uint32_t first = plugChannels > 0 ? std::min(plugFirst, extra) : extra;
+    const uint32_t last = plugChannels > 0 ? std::max(plugFirst + plugChannels - 1, extra) : extra;
+    mPlugInputOffset = plugChannels > 0 ? static_cast<int>(plugFirst - first) : 0;
+    mExtraInputOffset = static_cast<int>(extra - first);
+    iParams.firstChannel = first;
+    iParams.nChannels = last - first + 1;
+  }
+
+  mOpenInputChannels = static_cast<int>(iParams.nChannels);
 
   oParams.deviceId = outID;
   oParams.nChannels = GetPlug()->MaxNChannels(ERoute::kOutput);
@@ -727,7 +764,26 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
   mAudioEnding = false;
   mAudioDone = false;
 
-  auto status = mDAC->openStream(&oParams, iParams.nChannels > 0 ? &iParams : nullptr, RTAUDIO_FLOAT64, sr, &mBufferSize, &AudioCallback, this, &options);
+  auto openStream = [&](RtAudio::StreamParameters& in)
+  {
+    return mDAC->openStream(&oParams, in.nChannels > 0 ? &in : nullptr, RTAUDIO_FLOAT64, sr, &mBufferSize, &AudioCallback, this, &options);
+  };
+
+  auto status = openStream(iParams);
+
+  // The extra channel is a plug-in's request, not a need. A driver that will
+  // not open the wider run still opens the narrower one, so dropping the extra
+  // channel beats losing the stream.
+  if (status != RtAudioErrorType::RTAUDIO_NO_ERROR && mExtraInputOffset >= 0)
+  {
+    DBGMSG("Retrying the input without the extra channel: %s\n", mDAC->getErrorText().c_str());
+    mPlugInputOffset = 0;
+    mExtraInputOffset = -1;
+    iParams.firstChannel = plugFirst;
+    iParams.nChannels = plugChannels;
+    mOpenInputChannels = static_cast<int>(plugChannels);
+    status = openStream(iParams);
+  }
 
   if (status != RtAudioErrorType::RTAUDIO_NO_ERROR)
   {
@@ -753,21 +809,39 @@ bool IPlugAPPHost::InitAudio(uint32_t inID, uint32_t outID, uint32_t sr, uint32_
   mIPlug->SetSampleRate(mSampleRate);
   mIPlug->OnReset();
 
+  mInputBufPtrs.Empty();
   for (int i = 0; i < iParams.nChannels; i++)
   {
     mInputBufPtrs.Add(nullptr); //will be set in callback
   }
-    
+
+  mOutputBufPtrs.Empty();
   for (int i = 0; i < oParams.nChannels; i++)
   {
     mOutputBufPtrs.Add(nullptr); //will be set in callback
   }
-    
+
+  mTapInputPtrs.Empty();
+  mTapOutputPtrs.Empty();
+
+  for (int i = 0; i < GetPlug()->MaxNChannels(ERoute::kInput); i++)
+    mTapInputPtrs.Add(nullptr);
+
+  for (int i = 0; i < oParams.nChannels; i++)
+    mTapOutputPtrs.Add(nullptr);
+
   if (mDAC->startStream() != RTAUDIO_NO_ERROR)
   {
     DBGMSG("Error starting stream: %s\n", mDAC->getErrorText().c_str());
+    // Close it, so nothing reports a stream that opened but never started.
+    CloseAudio();
     return false;
   }
+
+  // Only a stream that has started can hand the tap callbacks or carry the
+  // extra input, so both are recorded here.
+  mExtraInputChannelOpen = mExtraInputOffset >= 0 ? extraInput : 0;
+  mStreamCount.fetch_add(1, std::memory_order_relaxed);
 
   mActiveState = mState;
 
@@ -845,9 +919,14 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
   
   if (startWait && !_this->mAudioDone)
   {
+    // Fading the whole run the stream opened takes the tap's extra channel in
+    // with the plug-in's own inputs.
     if (doFade)
-      ApplyFades(pInputBufferD, nins, nFrames, _this->mAudioEnding);
-    
+      ApplyFades(pInputBufferD, _this->mOpenInputChannels, nFrames, _this->mAudioEnding);
+
+    // The plug-in's channels sit partway into that run.
+    double* pPlugInputs = pInputBufferD + _this->mPlugInputOffset * nFrames;
+
     // Blocks of APP_SIGNAL_VECTOR_SIZE, the last one shorter so that none runs past the end of the buffer
     for (uint32_t start = 0; start < nFrames; start += APP_SIGNAL_VECTOR_SIZE)
     {
@@ -855,7 +934,7 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
 
       for (int c = 0; c < nins; c++)
       {
-        _this->mInputBufPtrs.Set(c, (pInputBufferD + (c * nFrames)) + start);
+        _this->mInputBufPtrs.Set(c, (pPlugInputs + (c * nFrames)) + start);
       }
 
       for (int c = 0; c < nouts; c++)
@@ -873,9 +952,32 @@ int IPlugAPPHost::AudioCallback(void* pOutputBuffer, void* pInputBuffer, uint32_
       pOutputBufferD[i] *= APP_MULT;
     }
 
+    // Handed the outputs before the fades, so whatever the tap adds to them is
+    // faded with the plug-in's own signal when a stream opens or closes.
+    if (IAppAudioTap* pTap = _this->mIPlug->mAudioTap.load(std::memory_order_acquire))
+    {
+      for (int c = 0; c < nins; c++)
+        _this->mTapInputPtrs.Set(c, pPlugInputs + c * nFrames);
+
+      for (int c = 0; c < nouts; c++)
+        _this->mTapOutputPtrs.Set(c, pOutputBufferD + c * nFrames);
+
+      AppAudioTapBlock block;
+      block.inputs = _this->mTapInputPtrs.GetList();
+      block.nInputs = nins;
+      block.outputs = _this->mTapOutputPtrs.GetList();
+      block.nOutputs = nouts;
+      block.extraInput = _this->mExtraInputOffset >= 0 ? pInputBufferD + _this->mExtraInputOffset * nFrames : nullptr;
+      block.nFrames = static_cast<int>(nFrames);
+      block.sampleRate = _this->mSampleRate;
+      block.callbackStartNs = std::chrono::duration_cast<std::chrono::nanoseconds>(callbackStart.time_since_epoch()).count();
+      block.stream = _this->mStreamCount.load(std::memory_order_relaxed);
+      pTap->OnAppAudio(block);
+    }
+
     if (doFade)
       ApplyFades(pOutputBufferD, nouts, nFrames, _this->mAudioEnding);
-    
+
     if (_this->mAudioEnding)
       _this->mAudioDone = true;
   }
