@@ -6,6 +6,17 @@
 
 iPlug 2 is a simple-to-use C++ framework for developing cross-platform audio plug-ins/apps and targeting multiple plug-in APIs with the same minimalistic code. It abstracts an audio plug-in (IPlug) and its drawing engine/GUI toolkit (IGraphics). IGraphics is a simple graphics abstraction layer with good performance which contains a collection of common controls well suited for audio plug-ins, either using bitmap or vector graphics. IGraphics can use [NanoVG](https://github.com/memononen/nanovg) or [Skia](https://skia.org/) as the drawing backend, providing many options depending on your requirements. Alternatively, iPlug2 can be used with other UI toolkits. [Examples](https://github.com/iPlug2/iPlug2/tree/master/Examples) are included showing how you can use technologies such as HTML/CSS or SwiftUI on top of a C++ DSP layer.
 
+## This fork
+
+`hrpr-main` is upstream `master` plus standalone-app changes HEADRIPPER Amp builds on; none of them affect a plug-in running in a host.
+
+- A saved input or output channel selection that does not fit the device falls back to the first channels that do, instead of failing to open.
+- An ASIO device's own sample rate and buffer size are followed when the app starts, and the stream reopens when the driver resets.
+- Buffer sizes that are not a multiple of 64 are processed without running past the buffer.
+- `APP_SETTINGS_SUBPATH` says where a standalone app's `settings.ini` lives.
+- `IPlugAPP::TakeCallbackLoad` reports how long the audio callback has been taking.
+- `IAppAudioTap` hands a plug-in every audio callback of the standalone, and the tap may add to the outputs the device plays; `IPlugAPP::SetExtraInputChannel` opens one more device input beside the plug-in's for it to read.
+
 The recommended starting point for an iPlug2 project in 2025 can be found in a separate repo, [iPlug2OOS (out-of-source)](https://github.com/iPlug2/iPlug2OOS)
 
 [iPlug2GPT](https://chat.openai.com/g/g-doomto3Ff-iplug2gpt) is a customized GPT that you can use to learn how to use iPlug2.
